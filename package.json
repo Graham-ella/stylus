@@ -1,0 +1,24 @@
+{
+  "name": "gpt-sovits-api",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "gptsovits"
+  ],
+  "author": "graham",
+  "license": "ISC",
+  "devDependencies": {
+    "@gradio/client": "^1.14.0",
+    "formdata-node": "^4.0.0"
+  },
+  "type": "module",
+  "dependencies": {
+    "csv-parser": "^3.2.0",
+    "node-fetch": "^3.3.2",
+    "wav": "^1.0.2"
+  }
+}
