@@ -6,10 +6,7 @@ import fetch from "node-fetch";
 import { Blob } from "buffer";
 import csv from "csv-parser";
 import wav from "wav";
-import { exec } from "child_process";
-import util from "util";
 
-const execAsync = util.promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -29,6 +26,12 @@ const config = {
         betweenEnglish: 0.3, // 英文两遍之间的间隔
         betweenEnZh: 0.5, // 英文和中文之间的间隔
         betweenWords: 1.0, // 单词之间的间隔
+    },
+    // 音频格式参数
+    audioFormat: {
+        sampleRate: 32000,
+        channels: 1,
+        bitDepth: 16,
     },
 };
 
@@ -104,7 +107,13 @@ async function generateWordAudio(wordData) {
 
         // 英文部分（只生成一遍）
         const enPath = path.join(versionDir, `${word}_en.wav`);
-        await generateTTS(exampleAudio, word, "English", "No slice", enPath);
+        await generateTTS(
+            exampleAudio,
+            word,
+            "English",
+            "No slice",
+            enPath
+        );
 
         // 中文部分（单独生成）
         const zhPath = path.join(versionDir, `${word}_zh.wav`);
@@ -116,71 +125,66 @@ async function generateWordAudio(wordData) {
     return wordDir;
 }
 
-// 创建静音片段
-async function createSilence(duration, outputPath) {
-    // 使用ffmpeg生成静音片段
-    const command = `ffmpeg -f lavfi -i anullsrc=r=32000:cl=mono -t ${duration} -acodec pcm_s16le ${outputPath}`;
-    await execAsync(command);
-    return outputPath;
+// 创建静音片段（纯Node.js实现）
+function createSilenceBuffer(durationSeconds) {
+    const bytesPerSample = config.audioFormat.bitDepth / 8;
+    const numSamples = Math.floor(
+        durationSeconds * config.audioFormat.sampleRate
+    );
+    const bufferSize = numSamples * bytesPerSample * config.audioFormat.channels;
+
+    // 创建全零缓冲区（静音）
+    return Buffer.alloc(bufferSize);
 }
 
-// 拼接音频文件（带间隔）
+// 拼接音频文件（带间隔）- 完全Node.js实现
 async function concatWithPauses(files, pauses, outputPath) {
-    // 临时文件列表
-    const tempFiles = [];
+    const writer = new wav.FileWriter(outputPath, {
+        channels: config.audioFormat.channels,
+        sampleRate: config.audioFormat.sampleRate,
+        bitDepth: config.audioFormat.bitDepth,
+    });
 
-    // 生成所有需要的静音片段
-    const silenceBetweenEn = await createSilence(
-        pauses.betweenEnglish,
-        path.join(config.outputDir, "silence_between_en.wav")
-    );
-
-    const silenceBetweenEnZh = await createSilence(
-        pauses.betweenEnZh,
-        path.join(config.outputDir, "silence_between_en_zh.wav")
-    );
-
-    const silenceBetweenWords = await createSilence(
-        pauses.betweenWords,
-        path.join(config.outputDir, "silence_between_words.wav")
-    );
-
-    // 创建拼接列表文件
-    const concatList = [];
+    // 创建静音缓冲区
+    const betweenEnSilence = createSilenceBuffer(pauses.betweenEnglish);
+    const betweenEnZhSilence = createSilenceBuffer(pauses.betweenEnZh);
+    const betweenWordsSilence = createSilenceBuffer(pauses.betweenWords);
 
     for (let i = 0; i < files.length; i++) {
-        // 当前单词的英文文件
-        concatList.push(`file '${files[i].en}'`);
+        const fileGroup = files[i];
 
-        // 英文两遍之间的间隔
-        concatList.push(`file '${silenceBetweenEn}'`);
+        // 读取英文音频
+        const enBuffer = await fs.promises.readFile(fileGroup.en);
+        // 读取中文音频
+        const zhBuffer = await fs.promises.readFile(fileGroup.zh);
 
-        // 英文第二遍（同一文件重复使用）
-        concatList.push(`file '${files[i].en}'`);
+        // 写入英文第一遍
+        writer.write(enBuffer);
 
-        // 英文和中文之间的间隔
-        concatList.push(`file '${silenceBetweenEnZh}'`);
+        // 写入英文之间的静音
+        writer.write(betweenEnSilence);
 
-        // 中文部分
-        concatList.push(`file '${files[i].zh}'`);
+        // 写入英文第二遍（同一文件）
+        writer.write(enBuffer);
 
-        // 单词之间的间隔（最后一个单词不加）
+        // 写入英文和中文之间的静音
+        writer.write(betweenEnZhSilence);
+
+        // 写入中文
+        writer.write(zhBuffer);
+
+        // 写入单词之间的静音（最后一个单词不加）
         if (i < files.length - 1) {
-            concatList.push(`file '${silenceBetweenWords}'`);
+            writer.write(betweenWordsSilence);
         }
     }
 
-    const listFilePath = path.join(config.outputDir, "concat_list.txt");
-    await fs.promises.writeFile(listFilePath, concatList.join("\n"));
-
-    // 使用ffmpeg拼接
-    const command = `ffmpeg -f concat -safe 0 -i "${listFilePath}" -c copy "${outputPath}"`;
-    await execAsync(command);
-
-    // 清理临时文件
-    await fs.promises.unlink(listFilePath);
-
-    return outputPath;
+    // 关闭写入流
+    return new Promise((resolve) => {
+        writer.end(() => {
+            resolve(outputPath);
+        });
+    });
 }
 
 // 主执行函数
@@ -198,7 +202,7 @@ async function main() {
         await app.predict("/change_sovits_weights", [
             config.sovitsWeight,
             config.refLang,
-            "English", // 设置为英文，因为我们会单独调用中文
+            "English",
         ]);
         await app.predict("/change_gpt_weights", [config.gptWeight]);
 
@@ -209,8 +213,7 @@ async function main() {
 
         console.log("✅ 所有单词音频生成完成");
 
-        // 拼接示例（使用第一个版本）
-
+        // 拼接示例（使用每个单词的第一个版本）
         const filesToConcat = [];
         for (const wordData of words) {
             const word = wordData.word;
